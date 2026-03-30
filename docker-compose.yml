@@ -127,6 +127,7 @@ services:
       - influxdb
   
   device-simulator:
+    # 適用於單設備、單連線模擬
     build: ./device-simulator
     container_name: device-simulator
     depends_on:
@@ -134,6 +135,19 @@ services:
       - emqx
     ports:
       - "9000:8080"
+
+  mqtt-bench:
+    # mqttx-cli：用於多設備同時連線模擬與壓測
+    image: emqx/mqttx-cli
+    profiles: ["loadtest"]
+    command: >
+      mqttx bench pub
+      -h emqx
+      -p 1883
+      -c 50
+      -t devices/device-%i/telemetry
+      -m '{"temperature":29,"humidity":66,"timeStamp":"2026-03-30T07:09:47.2125094Z"}'
+      -I device-%i
   
   telemetry-processor:
     build: ./telemetry-processor
