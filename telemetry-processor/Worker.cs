@@ -1,5 +1,4 @@
-﻿
-using Confluent.Kafka;
+﻿using Confluent.Kafka;
 using System.Text.Json;
 
 namespace telemetry_processor
@@ -70,14 +69,11 @@ namespace telemetry_processor
                                 var partition = result.Partition.Value;
                                 var offset = result.Offset.Value;
                                 var topic = result.Topic;
-                                
-                                // 從 Kafka 消息中提取時間戳
-                                var timestamp = result.Message.Timestamp.UtcDateTime;
 
-                                _logger.LogDebug($"Processing telemetry data from {topic}[{partition}] at offset {offset} with timestamp {timestamp}");
+                                // 準備寫入資料（包含 producer 提供的 timeStamp）
+                                var (tags, fields, timestamp) = PrepareTelemetryData(key, orderData, topic, partition, offset);
 
-                                // 準備寫入資料
-                                var (tags, fields) = PrepareTelemetryData(key, orderData, topic, partition, offset);
+                                _logger.LogDebug($"Processing telemetry data from {topic}[{partition}] at offset {offset} with payload timestamp {timestamp}");
                                 dataPoints.Add((tags, fields, timestamp));
                             }
                             catch (Exception ex)
@@ -126,7 +122,7 @@ namespace telemetry_processor
             }
         }
 
-        private (Dictionary<string, string> tags, Dictionary<string, object> fields) PrepareTelemetryData(string key, string data, string topic, int partition, long offset)
+        private (Dictionary<string, string> tags, Dictionary<string, object> fields, DateTime? timestamp) PrepareTelemetryData(string key, string data, string topic, int partition, long offset)
         {
             // 尝试解析 JSON 数据
             var fields = new Dictionary<string, object>();
@@ -135,6 +131,7 @@ namespace telemetry_processor
                 { "topic", topic },
                 { "partition", partition.ToString() }
             };
+            DateTime? timestamp = null;
 
             if (!string.IsNullOrEmpty(key))
             {
@@ -149,6 +146,20 @@ namespace telemetry_processor
 
                 foreach (var property in root.EnumerateObject())
                 {
+                    // producer 提供的資料時間戳，不寫入 fields，改用 point timestamp
+                    if (property.NameEquals("timeStamp"))
+                    {
+                        if (property.Value.ValueKind == JsonValueKind.String)
+                        {
+                            var tsText = property.Value.GetString();
+                            if (!string.IsNullOrWhiteSpace(tsText) && DateTime.TryParse(tsText, out var parsed))
+                            {
+                                timestamp = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+                            }
+                        }
+                        continue;
+                    }
+
                     var value = property.Value;
                     if (value.ValueKind == JsonValueKind.Number)
                     {
@@ -175,7 +186,7 @@ namespace telemetry_processor
 
             fields["offset"] = offset;
 
-            return (tags, fields);
+            return (tags, fields, timestamp);
         }
     }
 }

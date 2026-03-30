@@ -64,7 +64,8 @@ namespace device_simulator
             var telemetryData = new
             {
                 temperature = temperature,
-                humidity = humidity
+                humidity = humidity,
+                timeStamp = DateTime.UtcNow.ToString("o") // ISO 8601 格式
             };
 
             var payload = JsonSerializer.Serialize(telemetryData);
