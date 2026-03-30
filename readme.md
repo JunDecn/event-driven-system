@@ -5,7 +5,7 @@
 這是一個**端到端的事件驅動型 IoT 監控系統**，展示如何使用 MQTT 和事件流架構在分佈式系統中進行實時資料處理。
 
 **核心功能：**
-- 🌡️ 實時設備溫度監控（1000+ 設備模擬）
+- 🌡️ 實時設備溫度監控（50 台設備測試情境）
 - 📊 溫度異常告警（>30°C）
 - 💾 時間序列資料持久化（InfluxDB）
 - 📈 可視化儀表板（Grafana）
@@ -46,7 +46,8 @@ alert-processor  telemetry-processor
 ```
 
 ### 各元件職責
-- **Device Simulator**: 模擬 1000 台設備，每 5 秒發送溫度/濕度資料
+- **Device Simulator**: 適用於單設備、單連線模擬，方便功能驗證與端到端除錯
+- **MQTTX CLI (mqtt-bench)**: 用於多設備同時連線模擬與併發訊息壓測
 - **Bridge Service**: MQTT 訂閱者 → Kafka 生產者，負責協議轉換
 - **Alert Processor**: 批量消費告警（溫度 >30°C），記錄日誌
 - **Telemetry Processor**: 批量消費資料到 InfluxDB 進行時間序列存儲
@@ -74,20 +75,6 @@ docker-compose up -d
 docker-compose ps
 ```
 
-### 預期結果
-```
-CONTAINER ID   STATUS
-emqx           Up 2 minutes
-kafka          Up 2 minutes
-kafka2         Up 2 minutes
-kafka4         Up 2 minutes
-bridge-service Up 2 minutes
-device-simulator Up 2 minutes
-telemetry-processor Up 2 minutes
-alert-processor Up 2 minutes
-influxdb       Up 2 minutes
-grafana        Up 2 minutes
-```
 
 ### 服務入口
 | 服務 | URL/Port | 說明 |
@@ -109,29 +96,67 @@ grafana        Up 2 minutes
 curl -X POST "http://localhost:9000/send-telemetry?temperature=28.5&humidity=65"
 ```
 
-**2. 批量發送 1000 設備數據**
+**2. 發送單一設備1000筆數據（測試用途）**
 ```bash
 curl -X POST "http://localhost:9000/send-telemetry-all-devices?temperature=32&humidity=70"
 ```
-觸發 1000 台設備同時發送告警級數據
 
-### MQTT Topic 結構
+**3. 發送多設備遙測**
+
+正式併發連線使用 `mqttx-cli`進行測試，請手動啟用docker compose 的mqtt-bench，請注意timestamp為固定數值。
+
+---
+
+## 📝 MQTT Topic 協議
+
+**Topic Pattern:**
 ```
-Topic: devices/{deviceId}/telemetry
-Payload: 
+devices/{deviceId}/telemetry
+```
+
+**Payload Schema:**
+```json
 {
-  "temperature": 28.5,
-  "humidity": 65
+  "temperature": 28.5,    // 攝氏溫度
+  "humidity": 65,          // 相對濕度 (%)
+  "timestamp": "2026-03-30T10:30:45.123Z"
 }
 ```
 
-### Kafka Topic 結構
+**Example Topics:**
 ```
-Topic: iot.telemetry.raw
-Partition: 1
-Consumer Groups:
-  - alert-processor-group: 檢測溫度異常 (>30°C)
-  - telemetry-processor-group: 存儲到 InfluxDB
+devices/device-001/telemetry
+devices/device-002/telemetry
+...
+devices/device-1000/telemetry
+```
+
+---
+
+
+## 📊 Kafka Topic 協議
+
+**Topic Name:** `iot.telemetry.raw`
+
+**Partition:** 1 (確保消息順序)
+
+**Consumer Groups:**
+```
+1. alert-processor-group
+   └─ 消費和檢測溫度異常 (>30°C)
+   
+2. telemetry-processor-group
+   └─ 消費和存儲到 InfluxDB
+```
+
+**Message Format:**
+```json
+{
+  "deviceId": "device-001",
+  "temperature": 28.5,
+  "humidity": 65,
+  "timestamp": "2026-03-26T10:30:45.123Z"
+}
 ```
 
 ---
@@ -161,44 +186,23 @@ Consumer Groups:
 
 ---
 
-## 🔧 本地開發運行
-
-### 環境配置
-```bash
-# 配置 Python 環境（用於本地測試）
-python -m venv venv
-source venv/Scripts/activate  # Windows
-
-# 安裝依賴
-pip install paho-mqtt confluent-kafka
-```
-
-### 運行單個服務（本地調試）
-```bash
-# 終端 1: 啟動 Kafka
-docker-compose up -d kafka emqx
-
-# 終端 2: 運行 Bridge Service
-cd bridge-service
-dotnet run
-
-# 終端 3: 運行 Alert Processor
-cd alert-processor
-dotnet run
-```
-
----
 
 ## 📈 性能指標
 
 ### 系統容量
 | 指標 | 數值 |
 |-----|------|
-| 支援最大設備數 | 1000+ |
-| 消息吞吐量 (Kafka) | ~10K msg/s |
-| 單設備發送間隔 | 5 秒 |
-| 批處理大小 | 500 條/批 |
-| MQTT 連接超時 | 無限重試 |
+| 系統測試規模 | 50 台模擬設備 |
+| 目前上限吞吐 | 約 100 rps |
+| 主要瓶頸 | Bridge Service 為單點橋接 |
+| 測試定位 | 架構 Demo（不進行 rps 調校） |
+| MQTT 連接重試 | 無限重試 |
+| Kafka 連接重試 | 無限重試 |
+
+### 乘載補充
+- 本系統現階段重點在事件驅動架構展示，不以極限吞吐優化為目標。
+- 以 50 台模擬設備測試時，整體上限約為 100 rps。
+- 目前可觀察到的主要瓶頸是 Bridge Service 單點處理（MQTT→Kafka 轉換集中於單一服務）。
 
 ### 延遲分析
 ```
@@ -285,36 +289,19 @@ docker exec influxdb influx bucket list --token $TOKEN
 
 ---
 
-## 🚀 改進方向
-
-### 短期改進
-- [ ] 添加單元測試和集成測試
-- [ ] 實現消息死信隊列（DLQ）
-- [ ] 添加分布式追蹤（OpenTelemetry）
-- [ ] Kafka Consumer LAG 監控
-
-### 長期規劃
-- [ ] 支持多區域部署和地域復制
-- [ ] 實現設備命令下行通道
-- [ ] 添加數據加密和身份認證
-- [ ] 集成機器學習異常檢測
-
-
-
----
-
 ## 📐 完整架構圖
 
 ```
 IoT Device Simulator (1000 devices)
             │
-    MQTT    │ (publish every 5s)
+            │ MQTT (publish every 5s)
+            │
             ▼
         EMQX Broker (Port 1883)
         (Dashboard: 18083)
             │
-    MQTT    │ (subscribe)
-    Consume │
+            │ MQTT Consume (subscribe)
+            │
             ▼
     ┌─────────────────────┐
     │  Bridge Service     │
@@ -324,8 +311,8 @@ IoT Device Simulator (1000 devices)
     │  └─ Auto Reconnect  │
     └─────────────────────┘
             │
-    Kafka   │ (produce)
-    Publish │
+            │  Kafka Publish (produce)
+            │
             ▼
     ┌────────────────────────────────┐
     │  Kafka KRaft Cluster (3-node)  │
@@ -338,8 +325,8 @@ IoT Device Simulator (1000 devices)
             │
     ┌───────┴────────────────┐
     │                        │
-    ▼ (Group: alert)         ▼ (Group: telemetry)
-    
+    │ (Group: alert)         │ (Group: telemetry)
+    ▼                        ▼ 
 ┌──────────────────┐    ┌─────────────────────┐
 │ Alert Processor  │    │ Telemetry Processor │
 │ (.NET Worker)    │    │ (.NET Worker)       │
@@ -383,58 +370,6 @@ IoT Device Simulator (1000 devices)
 
 ---
 
-## 📝 MQTT Topic 協議
-
-**Topic Pattern:**
-```
-devices/{deviceId}/telemetry
-```
-
-**Payload Schema:**
-```json
-{
-  "temperature": 28.5,    // 攝氏溫度
-  "humidity": 65          // 相對濕度 (%)
-}
-```
-
-**Example Topics:**
-```
-devices/device-001/telemetry
-devices/device-002/telemetry
-...
-devices/device-1000/telemetry
-```
-
----
-
-## 📊 Kafka Topic 協議
-
-**Topic Name:** `iot.telemetry.raw`
-
-**Partition:** 1 (確保消息順序)
-
-**Consumer Groups:**
-```
-1. alert-processor-group
-   └─ 消費和檢測溫度異常 (>30°C)
-   
-2. telemetry-processor-group
-   └─ 消費和存儲到 InfluxDB
-```
-
-**Message Format:**
-```json
-{
-  "deviceId": "device-001",
-  "temperature": 28.5,
-  "humidity": 65,
-  "timestamp": "2026-03-26T10:30:45.123Z"
-}
-```
-
----
-
 ## 🐳 Docker 快速命令
 
 ```bash
@@ -462,7 +397,7 @@ docker-compose build --no-cache
 
 ---
 
-## 👤 開發者備註
+## 備註
 
 **項目重點：**
 - ✅ MQTT 發布/訂閱通信實踐
@@ -476,9 +411,4 @@ docker-compose build --no-cache
 - ❌ 消息加密和身份認證
 - ❌ 生產環境監控告警
 
-**改進機會：**
-- 添加分布式追蹤 (OpenTelemetry)
-- 實現消息死信隊列 (DLQ)
-- 統一日誌聚合 (ELK/Loki)
-- 性能測試報告
 
