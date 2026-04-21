@@ -1,4 +1,3 @@
-version: "3.9"
 
 services:
 
@@ -136,18 +135,14 @@ services:
     ports:
       - "9000:8080"
 
-  mqtt-bench:
-    # mqttx-cli：用於多設備同時連線模擬與壓測
-    image: emqx/mqttx-cli
+  multi-device-simulator:
+    # Python：用於多設備同時連線模擬與壓測
+    build: ./multi-device-simulator
     profiles: ["loadtest"]
-    command: >
-      mqttx bench pub
-      -h emqx
-      -p 1883
-      -c 50
-      -t devices/device-%i/telemetry
-      -m '{"temperature":29,"humidity":66,"timeStamp":"2026-03-30T07:09:47.2125094Z"}'
-      -I device-%i
+    depends_on:
+      - emqx
+      - bridge-service
+    command: ["python", "app.py"]
   
   telemetry-processor:
     build: ./telemetry-processor
