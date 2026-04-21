@@ -27,27 +27,92 @@
 | **Kafka (中樞層)** | 高吞吐量、持久化、可擴展；解耦生產/消費端 |
 | **多消費者群組** | 支持多種業務邏輯並行處理（告警/存儲/分析） |
 
-### 資料流動路徑
+
+### 架構圖
 ```
-IoT 設備（Device Simulator）
-         ↓ MQTT publish
-    EMQX Broker
-         ↓ MQTT subscribe
-    Bridge Service (轉換 + 路由)
-         ↓ Kafka produce
-    Kafka KRaft Cluster (3-node)
-     ↙            ↘
-告警提取          遙測提取
-alert-processor  telemetry-processor
-     ↓              ↓
-    Log          InfluxDB
-                    ↓
-                Grafana 展示
+IoT Device Simulator (1 devices) or Python mqtt-bench Service (50 devices)
+            │
+            │ MQTT (publish every 5s)
+            │
+            ▼
+        EMQX Broker (Port 1883)
+        (Dashboard: 18083)
+            │
+            │ MQTT Consume (subscribe)
+            │
+            ▼
+    ┌─────────────────────┐
+    │  Bridge Service     │
+    │  (.NET Worker)      │
+    │  ├─ MQTT Client     │
+    │  ├─ Kafka Producer  │
+    │  └─ Auto Reconnect  │
+    └─────────────────────┘
+            │
+            │  Kafka Publish (produce)
+            │
+            ▼
+    ┌────────────────────────────────┐
+    │  Kafka KRaft Cluster (3-node)  │
+    │  ├─ kafka:9092                 │
+    │  ├─ kafka2:9092                │
+    │  ├─ kafka4:9092                │
+    │  └─ Kafka UI: 8080             │
+    │     Topic: iot.telemetry.raw   │
+    └────────────────────────────────┘
+            │
+    ┌───────┴────────────────┐
+    │                        │
+    │ (Group: alert)         │ (Group: telemetry)
+    ▼                        ▼ 
+┌──────────────────┐    ┌─────────────────────┐
+│ Alert Processor  │    │ Telemetry Processor │
+│ (.NET Worker)    │    │ (.NET Worker)       │
+│ ├─ Consume batch │    │ ├─ Consume batch    │
+│ ├─ Detect >30°C  │    │ ├─ Parse JSON       │
+│ └─ Log ERROR     │    │ └─ Write InfluxDB   │
+└──────────────────┘    └─────────────────────┘
+    │ (Log)                     │ (Data Points)
+    ▼                           ▼
+    Console               ┌──────────────┐
+                          │  InfluxDB    │
+                          │  Port: 8086  │
+                          │  (Time Series│
+                          │   Database)  │
+                          └──────────────┘
+                                │
+                                ▼
+                          ┌─────────────┐
+                          │  Grafana    │
+                          │  Port: 3000 │
+                          │  (Dashboard)│
+                          └─────────────┘
 ```
+
+---
+
+## 🛠️ 使用技術棧
+
+| 層級 | 模組 | 技術 | 版本 | 用途 |
+|-----|------|------|------|------|
+| **IoT Edge** | Device Simulator | .NET 8 Web API | 8.0 | 設備數據模擬 |
+| **MQTT Layer** | EMQX Broker | EMQX | 5.6 | 輕量級消息代理 |
+| **Bridge** | Bridge Service | .NET 8 Worker | 8.0 | MQTT ↔ Kafka 轉換 |
+| **Event Stream** | Kafka KRaft | Kafka | Latest | 分布式事件流 |
+| **Kafka Monitor** | Kafka UI | Provectus | Latest | 集群監控 |
+| **Processing** | Alert Processor | .NET 8 Worker | 8.0 | 告警檢測邏輯 |
+| **Processing** | Telemetry Processor | .NET 8 Worker | 8.0 | 數據處理邏輯 |
+| **Storage** | InfluxDB | InfluxDB | 2.7 | 時間序列資料庫 |
+| **Visualization** | Grafana | Grafana | Latest | 數據可視化 |
+| **Container** | Docker Compose | Docker | 20.10+ | 容器編排 |
+
+備註：因為Demo時使用EMQX開源版，沒有提供kafka connector，所以選擇Bridge Service作為替代方案
+
+---
 
 ### 各元件職責
 - **Device Simulator**: 適用於單設備、單連線模擬，方便功能驗證與端到端除錯
-- **MQTTX CLI (mqtt-bench)**: 用於多設備同時連線模擬與併發訊息壓測
+- **Python Service (mqtt-bench)**: 用於多設備同時連線模擬與併發訊息壓測
 - **Bridge Service**: MQTT 訂閱者 → Kafka 生產者，負責協議轉換
 - **Alert Processor**: 批量消費告警（溫度 >30°C），記錄日誌
 - **Telemetry Processor**: 批量消費資料到 InfluxDB 進行時間序列存儲
@@ -59,8 +124,6 @@ alert-processor  telemetry-processor
 
 ### 前置需求
 - Docker Desktop 20.10+
-- Docker Compose 2.0+
-- 可用磁盤空間 500MB+
 - .NET 8 SDK (如本地開發)
 
 ### 一鍵啟動
@@ -103,7 +166,7 @@ curl -X POST "http://localhost:9000/send-telemetry-all-devices?temperature=32&hu
 
 **3. 發送多設備遙測**
 
-正式併發連線使用 `mqttx-cli`進行測試，請手動啟用docker compose 的mqtt-bench，請注意timestamp為固定數值。
+正式併發連線使用 Python mqtt-bench 服務進行測試，請手動啟用 docker compose 的 mqtt-bench（loadtest profile），timestamp 為即時動態值。
 
 ---
 
@@ -194,7 +257,7 @@ devices/device-1000/telemetry
 |-----|------|
 | 系統測試規模 | 50 台模擬設備 |
 | 目前上限吞吐 | 約 100 rps |
-| 主要瓶頸 | Bridge Service 為單點橋接 |
+| !!主要瓶頸 | Bridge Service 為單點橋接 |
 | 測試定位 | 架構 Demo（不進行 rps 調校） |
 | MQTT 連接重試 | 無限重試 |
 | Kafka 連接重試 | 無限重試 |
@@ -275,7 +338,7 @@ docker exec influxdb influx bucket list --token $TOKEN
 
 ### 工程實踐
 ✅ 多服務協調（Docker Compose）  
-✅ 協議轉換中間件開發  
+✅ 協議轉換中間件開發  (Bridge Service)
 ✅ 批量數據處理最佳實踐  
 ✅ 時間序列數據模型設計  
 
@@ -287,86 +350,6 @@ docker exec influxdb influx bucket list --token $TOKEN
 | InfluxDB 連接超時 | 增加連接池和重試邏輯 |
 | 容器間通信延遲 | 優化 Docker 網絡配置 |
 
----
-
-## 📐 完整架構圖
-
-```
-IoT Device Simulator (1000 devices)
-            │
-            │ MQTT (publish every 5s)
-            │
-            ▼
-        EMQX Broker (Port 1883)
-        (Dashboard: 18083)
-            │
-            │ MQTT Consume (subscribe)
-            │
-            ▼
-    ┌─────────────────────┐
-    │  Bridge Service     │
-    │  (.NET Worker)      │
-    │  ├─ MQTT Client     │
-    │  ├─ Kafka Producer  │
-    │  └─ Auto Reconnect  │
-    └─────────────────────┘
-            │
-            │  Kafka Publish (produce)
-            │
-            ▼
-    ┌────────────────────────────────┐
-    │  Kafka KRaft Cluster (3-node)  │
-    │  ├─ kafka:9092                 │
-    │  ├─ kafka2:9092                │
-    │  ├─ kafka4:9092                │
-    │  └─ Kafka UI: 8080             │
-    │     Topic: iot.telemetry.raw   │
-    └────────────────────────────────┘
-            │
-    ┌───────┴────────────────┐
-    │                        │
-    │ (Group: alert)         │ (Group: telemetry)
-    ▼                        ▼ 
-┌──────────────────┐    ┌─────────────────────┐
-│ Alert Processor  │    │ Telemetry Processor │
-│ (.NET Worker)    │    │ (.NET Worker)       │
-│ ├─ Consume batch │    │ ├─ Consume batch    │
-│ ├─ Detect >30°C  │    │ ├─ Parse JSON       │
-│ └─ Log ERROR     │    │ └─ Write InfluxDB   │
-└──────────────────┘    └─────────────────────┘
-    │ (Log)                     │ (Data Points)
-    ▼                           ▼
-    Console               ┌──────────────┐
-                          │  InfluxDB    │
-                          │  Port: 8086  │
-                          │  (Time Series│
-                          │   Database)  │
-                          └──────────────┘
-                                │
-                                ▼
-                          ┌─────────────┐
-                          │  Grafana    │
-                          │  Port: 3000 │
-                          │  (Dashboard)│
-                          └─────────────┘
-```
-
----
-
-## 🛠️ 使用技術棧
-
-| 層級 | 模組 | 技術 | 版本 | 用途 |
-|-----|------|------|------|------|
-| **IoT Edge** | Device Simulator | .NET 8 Web API | 8.0 | 設備數據模擬 |
-| **MQTT Layer** | EMQX Broker | EMQX | 5.6 | 輕量級消息代理 |
-| **Bridge** | Bridge Service | .NET 8 Worker | 8.0 | MQTT ↔ Kafka 轉換 |
-| **Event Stream** | Kafka KRaft | Kafka | Latest | 分布式事件流 |
-| **Kafka Monitor** | Kafka UI | Provectus | Latest | 集群監控 |
-| **Processing** | Alert Processor | .NET 8 Worker | 8.0 | 告警檢測邏輯 |
-| **Processing** | Telemetry Processor | .NET 8 Worker | 8.0 | 數據處理邏輯 |
-| **Storage** | InfluxDB | InfluxDB | 2.7 | 時間序列資料庫 |
-| **Visualization** | Grafana | Grafana | Latest | 數據可視化 |
-| **Container** | Docker Compose | Docker | 20.10+ | 容器編排 |
 
 ---
 
